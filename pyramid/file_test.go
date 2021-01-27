@@ -51,11 +51,13 @@ func TestPyramidWriteFile(t *testing.T) {
 
 	require.NoError(t, sut.Close())
 	require.NoError(t, sut.Store(ctx, filename))
+	require.NotNil(t, sut.cancelStore)
 
 	require.True(t, storeCalled)
 
 	require.Error(t, sut.Abort(ctx))
 	require.False(t, abortCalled)
+	require.Nil(t, sut.cancelStore)
 }
 
 func TestWriteValidate(t *testing.T) {
@@ -157,6 +159,7 @@ func TestAbort(t *testing.T) {
 
 	require.NoError(t, sut.Close())
 	require.False(t, abortCalled)
+
 	require.NoError(t, sut.Abort(ctx))
 	require.False(t, storeCalled)
 	require.True(t, abortCalled)
