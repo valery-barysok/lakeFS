@@ -27,7 +27,6 @@ import (
 	"github.com/treeverse/lakefs/api/gen/restapi/operations/objects"
 	"github.com/treeverse/lakefs/api/gen/restapi/operations/refs"
 	"github.com/treeverse/lakefs/api/gen/restapi/operations/repositories"
-	retentionop "github.com/treeverse/lakefs/api/gen/restapi/operations/retention"
 	setupop "github.com/treeverse/lakefs/api/gen/restapi/operations/setup"
 	"github.com/treeverse/lakefs/auth"
 	"github.com/treeverse/lakefs/auth/model"
@@ -41,7 +40,6 @@ import (
 	"github.com/treeverse/lakefs/logging"
 	"github.com/treeverse/lakefs/parade"
 	"github.com/treeverse/lakefs/permissions"
-	"github.com/treeverse/lakefs/retention"
 	"github.com/treeverse/lakefs/stats"
 	"github.com/treeverse/lakefs/upload"
 )
@@ -62,7 +60,6 @@ type Dependencies struct {
 	Auth            auth.Service
 	BlockAdapter    block.Adapter
 	Stats           stats.Collector
-	Retention       retention.Service
 	Parade          parade.Parade
 	Dedup           *dedup.Cleaner
 	MetadataManager auth.MetadataManager
@@ -78,7 +75,6 @@ func (d *Dependencies) WithContext(ctx context.Context) *Dependencies {
 		Auth:            d.Auth,
 		BlockAdapter:    d.BlockAdapter.WithContext(ctx),
 		Stats:           d.Stats,
-		Retention:       d.Retention,
 		Parade:          d.Parade,
 		Dedup:           d.Dedup,
 		MetadataManager: d.MetadataManager,
@@ -100,7 +96,7 @@ type Controller struct {
 	deps *Dependencies
 }
 
-func NewController(cataloger catalog.Cataloger, auth auth.Service, blockAdapter block.Adapter, stats stats.Collector, retention retention.Service, parade parade.Parade, dedupCleaner *dedup.Cleaner, metadataManager auth.MetadataManager, migrator db.Migrator, collector stats.Collector, logger logging.Logger) *Controller {
+func NewController(cataloger catalog.Cataloger, auth auth.Service, blockAdapter block.Adapter, stats stats.Collector, parade parade.Parade, dedupCleaner *dedup.Cleaner, metadataManager auth.MetadataManager, migrator db.Migrator, collector stats.Collector, logger logging.Logger) *Controller {
 	c := &Controller{
 		deps: &Dependencies{
 			ctx:             context.Background(),
@@ -108,7 +104,6 @@ func NewController(cataloger catalog.Cataloger, auth auth.Service, blockAdapter 
 			Auth:            auth,
 			BlockAdapter:    blockAdapter,
 			Stats:           stats,
-			Retention:       retention,
 			Parade:          parade,
 			Dedup:           dedupCleaner,
 			MetadataManager: metadataManager,
@@ -182,9 +177,6 @@ func (c *Controller) Configure(api *operations.LakefsAPI) {
 	api.ObjectsGetObjectHandler = c.ObjectsGetObjectHandler()
 	api.ObjectsUploadObjectHandler = c.ObjectsUploadObjectHandler()
 	api.ObjectsDeleteObjectHandler = c.ObjectsDeleteObjectHandler()
-
-	api.RetentionGetRetentionPolicyHandler = c.RetentionGetRetentionPolicyHandler()
-	api.RetentionUpdateRetentionPolicyHandler = c.RetentionUpdateRetentionPolicyHandler()
 
 	api.MetadataCreateSymlinkHandler = c.MetadataCreateSymlinkHandler()
 
@@ -2365,53 +2357,6 @@ func (c *Controller) ExportSetContinuousExportHandler() exportop.SetContinuousEx
 		}
 
 		return exportop.NewSetContinuousExportCreated()
-	})
-}
-
-func (c *Controller) RetentionGetRetentionPolicyHandler() retentionop.GetRetentionPolicyHandler {
-	return retentionop.GetRetentionPolicyHandlerFunc(func(params retentionop.GetRetentionPolicyParams, user *models.User) middleware.Responder {
-		deps, err := c.setupRequest(user, params.HTTPRequest, []permissions.Permission{
-			{
-				Action:   permissions.RetentionReadPolicyAction,
-				Resource: permissions.RepoArn(params.Repository),
-			},
-		})
-
-		if err != nil {
-			return retentionop.NewGetRetentionPolicyUnauthorized().
-				WithPayload(responseErrorFrom(err))
-		}
-
-		deps.LogAction("get_retention_policy")
-
-		policy, err := deps.Retention.GetPolicy(params.Repository)
-		if err != nil {
-			return retentionop.NewGetRetentionPolicyDefault(http.StatusInternalServerError).
-				WithPayload(responseErrorFrom(err))
-		}
-		return retentionop.NewGetRetentionPolicyOK().WithPayload(policy)
-	})
-}
-
-func (c *Controller) RetentionUpdateRetentionPolicyHandler() retentionop.UpdateRetentionPolicyHandler {
-	return retentionop.UpdateRetentionPolicyHandlerFunc(func(params retentionop.UpdateRetentionPolicyParams, user *models.User) middleware.Responder {
-		deps, err := c.setupRequest(user, params.HTTPRequest, []permissions.Permission{
-			{
-				Action:   permissions.RetentionWritePolicyAction,
-				Resource: permissions.RepoArn(params.Repository),
-			},
-		})
-		if err != nil {
-			return retentionop.NewUpdateRetentionPolicyUnauthorized().
-				WithPayload(responseErrorFrom(err))
-		}
-
-		err = deps.Retention.UpdatePolicy(params.Repository, params.Policy)
-		if err != nil {
-			return retentionop.NewUpdateRetentionPolicyDefault(http.StatusInternalServerError).
-				WithPayload(responseErrorFrom(err))
-		}
-		return retentionop.NewUpdateRetentionPolicyCreated()
 	})
 }
 
