@@ -7,18 +7,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/treeverse/lakefs/graveler"
+
 	"github.com/treeverse/lakefs/block"
 	"github.com/treeverse/lakefs/catalog"
 	"github.com/treeverse/lakefs/catalog/rocks"
 	"github.com/treeverse/lakefs/cmdutils"
-	"github.com/treeverse/lakefs/graveler"
 	"github.com/treeverse/lakefs/logging"
 )
 
 const CommitMsgTemplate = "Import from %s"
 
 type Importer struct {
-	repository         string
 	inventoryGenerator block.InventoryGenerator
 	inventory          block.Inventory
 	CatalogActions     RepoActions
@@ -26,7 +26,6 @@ type Importer struct {
 	previousCommit     *catalog.CommitLog
 	progress           []*cmdutils.Progress
 	prefixes           []string
-	rocks              bool
 }
 
 type Config struct {
@@ -37,13 +36,11 @@ type Config struct {
 	Cataloger          catalog.Cataloger
 	CatalogActions     RepoActions
 	KeyPrefixes        []string
-	Rocks              bool
 	EntryCatalog       *rocks.EntryCatalog
 }
 
 type Stats struct {
 	AddedOrChanged       int
-	Deleted              int
 	DryRun               bool
 	PreviousInventoryURL string
 	CommitRef            string
@@ -51,31 +48,25 @@ type Stats struct {
 }
 
 var (
-	ErrNoInventoryURL           = errors.New("no inventory_url in commit Metadata")
-	ErrInventoryAlreadyImported = errors.New("given inventory was already imported")
-	ErrIncompatiblePrefixes     = errors.New("prefix filter should cover at least the same keys as the previous import")
+	ErrIncompatiblePrefixes = errors.New("prefix filter should cover at least the same keys as the previous import")
 )
 
 func CreateImporter(ctx context.Context, logger logging.Logger, config *Config) (importer *Importer, err error) {
 	res := &Importer{
-		repository:         config.Repository,
 		inventoryGenerator: config.InventoryGenerator,
 		logger:             logger,
-		rocks:              config.Rocks,
 		CatalogActions:     config.CatalogActions,
 	}
 
 	if res.CatalogActions == nil {
-		res.CatalogActions = buildRepoActions(config, logger)
+		res.CatalogActions = NewCatalogRepoActions(config.EntryCatalog, graveler.RepositoryID(config.Repository), config.CommitUsername, logger, config.KeyPrefixes)
 	}
 
-	previousCommit, err := res.CatalogActions.GetPreviousCommit(ctx)
-	if err != nil {
+	if err := res.CatalogActions.InitBranch(ctx); err != nil {
 		return nil, fmt.Errorf("failed to get previous commit: %w", err)
 	}
-	res.previousCommit = previousCommit
-	shouldSort := res.previousCommit != nil || res.rocks
-	res.inventory, err = config.InventoryGenerator.GenerateInventory(ctx, logger, config.InventoryURL, shouldSort, config.KeyPrefixes)
+
+	res.inventory, err = config.InventoryGenerator.GenerateInventory(ctx, logger, config.InventoryURL, true, config.KeyPrefixes)
 	res.prefixes = config.KeyPrefixes
 	if !res.validatePrefixes() {
 		return nil, ErrIncompatiblePrefixes
@@ -86,46 +77,12 @@ func CreateImporter(ctx context.Context, logger logging.Logger, config *Config) 
 	return res, nil
 }
 
-// ugly workaround until mvcc is fully deprecated
-func buildRepoActions(c *Config, logger logging.Logger) RepoActions {
-	if c.Rocks {
-		return NewRocksCatalogRepoActions(c.EntryCatalog, graveler.RepositoryID(c.Repository), c.CommitUsername, logger, c.KeyPrefixes)
-	}
-
-	return NewCatalogActions(c.Cataloger, c.Repository, c.CommitUsername, logger)
-}
-
-func (s *Importer) diffIterator(ctx context.Context, commit catalog.CommitLog) (Iterator, error) {
-	previousInventoryURL := ExtractInventoryURL(commit.Metadata)
-	if previousInventoryURL == "" {
-		return nil, fmt.Errorf("%w. commit_ref=%s", ErrNoInventoryURL, commit.Reference)
-	}
-	if previousInventoryURL == s.inventory.InventoryURL() {
-		return nil, fmt.Errorf("%w. commit_ref=%s", ErrInventoryAlreadyImported, commit.Reference)
-	}
-	previousPrefixes := ExtractPrefixes(commit.Metadata)
-	previousInv, err := s.inventoryGenerator.GenerateInventory(ctx, s.logger, previousInventoryURL, true, previousPrefixes)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create inventory for previous state: %w", err)
-	}
-	previousObjs := previousInv.Iterator()
-	currentObjs := s.inventory.Iterator()
-	return NewDiffIterator(previousObjs, currentObjs), nil
-}
-
 func (s *Importer) Import(ctx context.Context, dryRun bool) (*Stats, error) {
 	var dataToImport Iterator
 	var err error
-	if s.rocks || s.previousCommit == nil {
-		it := s.inventory.Iterator()
-		// no previous commit, add whole inventory
-		dataToImport = NewInventoryIterator(it)
-	} else {
-		dataToImport, err = s.diffIterator(ctx, *s.previousCommit)
-		if err != nil {
-			return nil, err
-		}
-	}
+	it := s.inventory.Iterator()
+	// no previous commit, add whole inventory
+	dataToImport = NewInventoryIterator(it)
 
 	s.progress = append(dataToImport.Progress(), s.CatalogActions.Progress()...)
 	stats, err := s.CatalogActions.ApplyImport(ctx, dataToImport, dryRun)
